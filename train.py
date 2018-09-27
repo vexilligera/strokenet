@@ -233,9 +233,10 @@ def train_cnnfc(epochs, cnn_path='./CNNEncoder', gen_path='./generator'):
 	generator = StrokeGenerator(config['batch_size'], config['max_pts'])
 	color_radius, pos, pres = cnnEncoder.dense(input_image, [4, 2*config['max_pts'], config['max_pts']])
 
+	# brush preset
 	_color_radius = tf.tile(tf.constant([[0.04, 0.85,  0.85, 0.85]]), [config['batch_size'], 1])
 	#_pres = tf.constant([[0.9] * config['max_pts']] * config['batch_size'])
-	pos /= 1.5 #2.0
+	pos /= 1.5 #2.0 # keep center
 
 	points = tf.reshape(pos, [-1, config['max_pts'], 2])
 	points = tf.concat([points, tf.expand_dims(pres, axis=-1), tf.zeros([config['batch_size'], config['max_pts'], 1])], axis=-1)
