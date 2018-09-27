@@ -341,6 +341,6 @@ def main(train_gen=False):
 		print('Start training StrokeGenerator.')
 		train_generator()
 		print('Done training Generator.')
-	train_cnnfc(8192*4)
+	train_cnnfc(8192)
   
 main()
