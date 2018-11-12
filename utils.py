@@ -1,129 +1,116 @@
 import numpy as np
+import math
 import random
-import os
+import pickle
+import torch
 from PIL import Image
-from matplotlib import pyplot as plt
+from NodeServer import Draw
 
-plt.switch_backend('agg')
+def tensor2Image(tensor, path='', norm=True):
+    if 'numpy' not in str(type(tensor)):
+        tensor = tensor.cpu().detach().numpy()
+    if norm:
+        tensor *= 255
+    img = Image.fromarray(tensor).convert('RGB')
+    if path == '':
+        img.show()
+    else:
+        img.save(path)
 
-config = {}
-# number of training samples
-n_samples = 0
-# generate training data
-index = 0
-training_sample_list = []
+class Renderer(object):
+    def __init__(self, url, size):
+        self.url = url
+        self.size = size
+        self.draw = Draw()
+        self.draw.setUrl(url)
 
-def load_dataset(path, cfg, classifier=True):
-	global n_samples
-	global config
-	global training_sample_list
-	global index
-	index = 0
-	dataset = {}
-	config = cfg
-	n_samples = config['n_samples']
-	f = open(path + '/points.txt', 'r')
-	dataset['label'] = eval(f.read())
-	dataset['classification'] = []
-	dataset['path'] = path
-	dataset['classifier'] = classifier
-	f.close()
-	if classifier:
-		f = open(path + '/labels.txt', 'r')
-		raw = f.read()
-		f.close()
-		for i in raw:
-			dataset['classification'].append(int(i) - 1)
-	training_sample_list = [i for i in range(0, n_samples)]
-	random.shuffle(training_sample_list)
-	return dataset
+    def render(self, color_radius, points):
+        draw = self.draw
+        stroke = []
+        n = len(points)
+        for i in range(n):
+            x = points[i][0]
+            y = points[i][1]
+            p = points[i][2]
+            stroke.append({'x': x, 'y': y, 'pressure': p})
+        draw.setSize(self.size, self.size)
+        draw.setRadius(color_radius[-1])
+        draw.setColor(color_radius[0:3])
+        draw.stroke(stroke)
+        image = draw.getImage()
+        draw.close()
+        return image
 
-def gen_omniglot(batch_size, path):
-	def pad0(vector, pad_width, iaxis, kwargs):
-			vector[:pad_width[0]] = 1.0
-			vector[-pad_width[1]:] = 1.0
-			return vector
-	images = []
-	paths = []
-	for i in range(batch_size):
-		img_path = path
-		while img_path[-3:len(img_path)] != 'png':
-			dirs = []
-			for i in os.listdir(img_path):
-				dirs.append(i)
-			a, = random.sample(dirs, 1)
-			img_path = os.path.join(img_path, a)
-		paths.append(img_path)
-		image = Image.open(img_path)
-		image = image.resize((128, 128), Image.ANTIALIAS)
-		image = np.asarray(image)
-		image = np.lib.pad(image, 64, pad0)
-		images.append(0.4*(1.0 - image))
-	return np.expand_dims(np.array(images), axis=-1), paths
+class CoordinateData(object):
+    def __init__(self, shape=[64, 64], batch_size=64):
+        self.shape = shape
+        self.batch_size = batch_size
 
-def shuffle_dataset():
-	random.shuffle(training_sample_list)
+    def gaussian(self, mu1, mu2, sig1=1.0, sig2=1.0, rho=0, norm=1):
+        shape = self.shape
+        x = np.array([i for i in range(0 - mu1, shape[0] - mu1)])
+        y = np.array([i for i in range(0 - mu2, shape[1] - mu2)])
+        u = np.tile(x, (shape[1], 1)) / sig1
+        v = np.tile(y, (shape[0], 1)).T / sig2
+        a = 1 / (2 * math.pi * sig1 * sig2 * np.sqrt(1 - rho**2))
+        b = -1 / (2 * (1 - rho**2)) * (np.square(u) - 2 * rho * u * v + np.square(v))
+        z = a * np.exp(b)
+        if norm != 0:
+            z *= norm
+        return z
 
-def array2Image(array):
-	return Image.fromarray(np.squeeze(array * 255)).convert('RGB')
+    def nextBatch(self):
+        points = []
+        bitmap = []
+        shape = self.shape
+        for i in range(self.batch_size):
+            x = int(random.random() * (shape[0] + 2) - 2)
+            y = int(random.random() * (shape[1] + 2) - 2)
+            z = self.gaussian(x, y, norm=2*math.pi)
+            x = x / (shape[0] / 2) - 1
+            y = 1 - y / (shape[1] / 2)
+            points.append([x, y])
+            bitmap.append(z)
+        points, bitmap = np.array(points), np.array(bitmap)
+        return torch.FloatTensor(points), torch.FloatTensor(bitmap).unsqueeze(1)
 
-def generate_batch(dataset, batch_size=None, channels=1, classification=False, inverse=True):
-	global training_sample_list
-	global index
-	global n_samples
-	if batch_size == None:
-		batch_size = config['batch_size']
-	subscript = [i for i in range(index, index + batch_size)]
-	if index + batch_size >= n_samples:
-		subscript[n_samples - index : batch_size] = [i for i in range(0, index + batch_size - n_samples)]
-		index = 0
-		random.shuffle(training_sample_list)
-	index += batch_size
-	batch = [training_sample_list[i] for i in subscript]
-	images = []
-	class_labels = []
-	label_data = []
-	label_points = []
-	for i in batch:
-		img = Image.open('./%s/%d.png' % (dataset['path'], i))
-		images.append(np.array(img)[:, :, 0:channels])
-		label = dataset['label'][i]
-		color = [label[0]['color']]*3 if type(label[0]['color']) is float else label[0]['color'] #[0 if label[0]['color'] < 0 else label[0]['color']] * 3
-		label_data.append([np.array([label[0]['radius']] + color)])
-		a = np.array([[t['x'], t['y'], t['pressure'], 1] for t in label[1:len(label)+1]])
-		if classification:
-			onehot = [0 for j in range(0, config['n_classes'])]
-			class_label = dataset['classification'][i]
-			onehot[class_label] = 1
-			class_labels.append(onehot)
-		if a.shape[0] < config['max_pts']:
-			stop = np.zeros((config['max_pts']-a.shape[0], a.shape[1]), dtype=np.float32)
-			stop[:, 2] =  0
-			a = np.vstack((a, stop))
-		label_points.append(a)
+class Threebody(object):
+    def load(self, path):
+        self.path = path
+        f = open(path + '/strokes.pkl', 'rb')
+        self.data = pickle.load(f)
+        self.n_samples = len(self.data)
+        f.close()
+        self.sample_list = [i for i in range(self.n_samples)]
+        random.shuffle(self.sample_list)
+        self.index = 0
+        self.epoch = 0
+        self.iteration = 0
 
-	imgs = np.array(images)
-	if inverse:
-		imgs = np.ones(imgs.shape) - imgs / 255.0
-	else:
-		imgs = imgs / 255.0
+    def __init__(self, path, batch_size=64):
+        self.load(path)
+        self.batch_size = batch_size
+        if batch_size > self.n_samples:
+            raise("utils.py: batch size cannot be bigger than #samples.")
 
-	if classification:
-		return imgs, np.array(class_labels)
-	else:
-		data = np.squeeze(np.array(label_data))
-		points = np.array(label_points)
-		data = np.expand_dims(data, 1)
-		labels = np.concatenate([data, points], axis=1)
-		return imgs, labels
-
-def points_plot(stroke, name, length, n=1):
-	fig, ax = plt.subplots()
-	plt.axis([-1,1,-1,1])
-	color = ['maroon', 'red', 'salmon', 'coral', 'chocolate', 'bisque', \
-			 'floralwhite', 'gold', 'olive', 'yellow', 'yellowgreen', 'seagreen', \
-			 'turquoise', 'deepskyblue', 'navy', 'slateblue']
-	for i in range(0, length * n):
-		ax.scatter(stroke[i][0], stroke[i][1], color = color[i//n])
-	plt.savefig(name)
-	plt.close()
+    def nextBatch(self):
+        images, data, trajectories = [], [], []
+        for i in range(self.batch_size):
+            if self.index == self.n_samples:
+                self.index = 0
+                random.shuffle(self.sample_list)
+                self.epoch += 1
+                self.iteration = 0
+            num = self.sample_list[self.index]
+            image = Image.open('%s/%d.png' % (self.path, num))
+            d = self.data[num]
+            images.append(1.0 - np.array(image)[:, :, 0] / 255.0)
+            data.append(d[0:2])
+            trajectories.append(d[2:])
+            self.index += 1
+        data = np.array(data)
+        trajectories = np.array(trajectories)
+        # NCWH
+        images = np.expand_dims(np.array(images), 1)
+        self.iteration += 1
+        return images, data, trajectories
