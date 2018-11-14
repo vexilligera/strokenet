@@ -175,3 +175,97 @@ class Agent(nn.Module):
 
     def forward(self, x):
         return self.decoder(self.cnn(x))
+
+class RecurrentGenerator(nn.Module):
+    def __init__(self, channels, sg_path, max_steps=16, alpha_pow=0.5):
+        super(RecurrentGenerator, self).__init__()
+        self.max_steps = max_steps + 1
+        self.alpha_pow = alpha_pow
+        self.channels = channels
+        self.sg = StrokeGenerator()
+        self.sg.load_state_dict(torch.load(
+                                sg_path, map_location=device))
+        self.reset()
+        self.relu = nn.ReLU()
+        self.freeze()
+
+    def reset(self, frame0 = None):
+        self.frames = [None for i in range(self.max_steps)]
+        self.index = 0
+        if type(frame0) != type(None):
+            self.frames[0] = frame0
+
+    def freeze(self):
+    	self.sg.freeze()
+
+    def forward(self, data, points):
+        sg_input_data = None
+        color = None
+        if self.channels == 3:
+            gray = torch.max(data[:, 0:3], 1)[0]
+            sg_input_data = torch.stack((gray, data[:, 3]), 1)
+            color = data[:, 0:3].view((data.shape[0], 3, 1, 1))
+        elif self.channels == 1:
+            sg_input_data = data[:, 2:4]
+            color = data[:, 2].view((data.shape[0], 1, 1, 1))
+        contour = self.relu(self.sg(sg_input_data, points))
+        m = torch.max(contour.view((contour.shape[0], -1)), 1)[0]
+        alpha = contour / m.view(data.shape[0], 1, 1, 1)
+        result = color * alpha
+
+        if type(self.frames[0]) == type(None):
+            self.frames[0] = result
+        elif self.index + 1 >= self.max_steps:
+            raise("RecurrentGenerator error: maximum step exceeded.")
+        else:
+            i = self.index
+            self.frames[i + 1] = self.frames[i] * (1 - alpha) + result
+            self.index += 1
+        return self.frames[self.index]
+
+class RecurrentAgent(nn.Module):
+    def __init__(self, size, channels, rg, max_steps=16, n_hidden=512):
+        super(RecurrentAgent, self).__init__()
+        self.cnn_target = AgentCNN(channels)
+        self.cnn_dim = self.cnn_target.output_size(size)
+        self.fc_target = nn.Linear(self.cnn_dim, 1024)
+        self.tanh_target = nn.Tanh()
+        self.cnn_gen = AgentCNN(channels)
+        self.fc_gen = nn.Linear(self.cnn_dim, 1024)
+        self.n_hidden = n_hidden
+        self.fc_hidden = nn.Linear(1024*2, n_hidden)
+        self.tanh = nn.Tanh()
+        self.action_decoder = AgentFC(n_hidden)
+        self.tanh_gen = nn.Tanh()
+        self.steps = [None for i in range(max_steps)]
+        self.max_steps = max_steps
+        self.mse = torch.nn.MSELoss(reduce=False, size_average=False)
+        self.rg = rg
+
+    def forward(self, x_target, background='black', regularizer=None):
+        if type(regularizer) != type(None):
+            regularizer = torch.stack([regularizer] * x_target.shape[0], 0)
+
+        if background == 'black':
+            background = torch.zeros_like(x_target).to(device)
+        elif background == 'white':
+            background = torch.ones_like(x_target).to(device)
+        self.rg.reset(background)
+        n_segments = self.action_decoder.n_steps - 1
+        avg_dist = torch.tensor(0.0).to(device)
+
+        feat_target = self.tanh_target(self.fc_target(
+                                        self.cnn_target(x_target)))
+        for i in range(self.max_steps):
+            x_current = self.rg.frames[i]
+            feat_current = self.tanh_gen(self.fc_gen(
+                                        self.cnn_gen(x_current)))
+            features = torch.cat((feat_target, feat_current), 1)
+            hidden = self.tanh(self.fc_hidden(features))
+            color_radius, action = self.action_decoder(hidden)
+            if type(regularizer) != type(None):
+                color_radius = color_radius * regularizer
+            self.rg(color_radius, action)
+            self.steps[i] = (color_radius, action)
+            avg_dist = avg_dist + self.mse(action[:, 0:15], action[:, 1:16])
+        return self.rg.frames[self.max_steps], avg_dist / self.max_steps
