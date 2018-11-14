@@ -130,6 +130,56 @@ def train_agent_mnist(gen_path, mnist_agent_path, restrain=True):
         print('Epoch ', epoch)
         torch.save(agent.state_dict(), mnist_agent_path)
 
+def train_recurrent_agent_mnist(gen_path, agent_path):
+    batch_size = 32
+    rnn_steps = 3
+    # MNIST preprocess
+    mnist_size = 28
+    mnist_resize = 120
+    brightness = 0.6
+    trans = transforms.Compose(transforms = [
+        transforms.Resize(mnist_resize),
+        transforms.Pad(int((256 - mnist_resize) / 2)),
+        transforms.ToTensor(),
+        lambda x: x * brightness
+    ])
+    train_data = torchvision.datasets.MNIST(root='./dataset/mnist',train=True,
+                            transform=trans, download=True)
+    data_loader = torch.utils.data.DataLoader(train_data, 
+                                            batch_size=batch_size, shuffle=True)
+
+    # model definition and hyper-parameters
+    regularizer = torch.tensor([1, 1, 1, 0.1]).to(device)
+    # recurrent generator records and composite the canvas at each step
+    rg = RecurrentGenerator(1, gen_path).to(device)
+    # recurrent agent reads data from rg at each step
+    ra = RecurrentAgent(256, 1, rg, max_steps=rnn_steps).to(device)
+
+    if os.path.exists(agent_path):
+        ra.load_state_dict(torch.load(agent_path, map_location=device))
+    
+    MSE = torch.nn.MSELoss(reduce=False, size_average=False).to(device)
+    lr = 1e-4
+    LAMBDA = 2e2
+    optimizer = torch.optim.Adam(filter(
+                lambda p: p.requires_grad, ra.parameters()), lr=lr)
+
+    for epoch in range(10):
+        for i, (images, labels) in enumerate(data_loader):
+            images = images.to(device)
+            approx, penalty = ra(images, regularizer=regularizer)
+            loss = MSE(images, approx) + LAMBDA * penalty
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            if i % 200 == 0:
+                tensor2Image(approx[0, 0], './agent_output/%d_approx.bmp' % i)
+                tensor2Image(images[0, 0], './agent_output/%d_mnist.bmp' % i)
+                saveData(ra.steps, rnn_steps, './agent_output/%d_data.txt' % i)
+            print('\rIteration %d loss %f' % (i, loss.cpu().detach().numpy()), end='')
+        torch.save(ra.state_dict(), agent_path)
+
 # train_coord_encoder('./model/coordenc.pkl')
 # train_generator('./model/coordenc.pkl', './model/gen.pkl', './dataset/3')
-train_agent_mnist('./model/gen.pkl', './model/mnist_agent.pkl')
+# train_agent_mnist('./model/gen.pkl', './model/mnist_agent.pkl')
+train_recurrent_agent_mnist('./model/gen.pkl', './model/recurrent_mnist_agent.pkl')
