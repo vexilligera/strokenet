@@ -1,4 +1,7 @@
 # StrokeNet  
+Check out this work, neural renderer + RL works better
+https://github.com/hzwer/SARA_DDPG
+
 A neural network that learns to draw digits by strokes  
 The environment relies on node.js and puppeteer  
 Needs tweaking to get it work  
